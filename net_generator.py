@@ -62,13 +62,13 @@ class Solver:
         self.p.momentum = 0.9
         self.p.weight_decay = 0.0001
 
-        self.p.display = 100
+        self.p.display = 1000
         self.p.max_iter = 64000
         self.p.snapshot = 10000
         self.p.snapshot_prefix = osp.join(self.folder, "snapshot/")
         self.p.solver_mode = self.machine.GPU
 
-        self.p.type = self.method.nesterov
+        self.p.type = self.method.SGD
         self.p.net = osp.join(self.folder, "trainval.prototxt")
 
     def write(self):
@@ -144,10 +144,15 @@ class Net:
         new_param.lr_mult = lr_mult
         new_param.decay_mult = decay_mult
 
-    def transform_param(self, mean_value=128, batch_size=128, scale=.0078125, mirror=1, crop_size=None, mean_file_size=None, phase=None):
+    def transform_param(self, 
+            mean_value=128, 
+            batch_size=128, 
+            scale=1., #.0078125, 
+            mirror=1, crop_size=None, mean_file_size=None, phase=None):
 
         new_transform_param = self.this.transform_param
-        new_transform_param.scale = scale
+        if scale != 1.:
+            new_transform_param.scale = scale
         new_transform_param.mean_value.extend([mean_value])
         if phase is not None and phase == 'TEST':
             return
@@ -206,20 +211,23 @@ class Net:
         self.param(lr_mult=0, decay_mult=0)
         batch_norm_param = self.this.batch_norm_param
         #batch_norm_param.use_global_stats = False
-        #batch_norm_param.moving_average_fraction = 0.95
+        batch_norm_param.moving_average_fraction = 0.9
 
     def Scale(self, name=None):
         self.setup(self.suffix('scale', name), 'Scale', inplace=True)
+        self.param(lr_mult=1, decay_mult=1)
+        self.param(lr_mult=2, decay_mult=0)
         self.this.scale_param.bias_term = True
 
     #************************** layers **************************
 
-    def Data(self, source, top=['data', 'label'], name="data", phase=None, **kwargs):
+    def Data(self, source, top=['data', 'label'], name="data", phase=None,
+            batch_size=128, **kwargs):
         self.setup(name, 'Data', top=top)
 
         self.include(phase)
 
-        self.data_param(source)
+        self.data_param(source, batch_size=batch_size)
         self.transform_param(phase=phase, **kwargs)
         
     def Convolution(self, name, bottom=[], num_output=None, kernel_size=3, pad=1, stride=1, decay = True, bias = False, freeze = False):
@@ -246,12 +254,15 @@ class Net:
         self.weight_filler()
 
         if bias:
-            if decay:
-                decay_mult = 2
-            else:
-                decay_mult = 0
-            self.param(lr_mult=lr_mult, decay_mult=decay_mult)
+            #if decay:
+            #    decay_mult = 2
+            #else:
+            decay_mult = 0
+            self.param(lr_mult=2*lr_mult, decay_mult=decay_mult)
             self.bias_filler()
+        else:
+            conv_param.bias_term = False
+            
         
     def SoftmaxWithLoss(self, name='loss', label='label'):
         self.setup(name, 'SoftmaxWithLoss', bottom=[self.cur.name, label])
@@ -331,6 +342,7 @@ class Net:
             self.Eltwise(name+'_sum', bottom1=name+'_conv1')
         else:
             self.Eltwise(name+'_sum', bottom1=bottom)
+        self.ReLU(name+'_relu')
     
     def res_group(self, group_id, n, num_output):
         def name(block_id):
@@ -349,7 +361,7 @@ class Net:
     def resnet_cifar(self, n=3):
         """6n+2, n=3 9 18 coresponds to 20 56 110 layers"""
         num_output = 16
-        self.conv_bn_relu('first_conv', num_output=num_output)
+        self.conv_bn_relu('first_conv', num_output=num_output, bias=True)
         for i in range(3):
             self.res_group(i, n, num_output*(2**i))
         
@@ -360,8 +372,10 @@ class Net:
 
 
 if __name__ == '__main__':
-    n=18
-    pt_folder = osp.join(osp.abspath(osp.curdir), "resnet-%d" % (6*n+2))
+    #3, 5, 7, 9, 18
+    n=7
+    #pt_folder = osp.join(osp.abspath(osp.curdir), "resnet-%d" % (6*n+2))
+    pt_folder = "resnet-%d" % (6*n+2)
     name = 'resnet'+str(n)+'-cifar10'
 
     solver = Solver(folder=pt_folder)
@@ -369,7 +383,7 @@ if __name__ == '__main__':
 
     builder = Net(name)
     builder.Data('cifar-10-batches-py/train', phase='TRAIN', crop_size=32)
-    builder.Data('cifar-10-batches-py/test', phase='TEST')
+    builder.Data('cifar-10-batches-py/test', phase='TEST', batch_size=100)
     builder.resnet_cifar(n)
     builder.write(folder=pt_folder)
 
